@@ -47,25 +47,38 @@ def small_roots(f, bounds, m=1, d=None, algorithm='groebner', lattice_reduction=
 
     verbose = (lambda *a: print('[small_roots]', *a)) if verbose else lambda *_: None
 
-    if algorithm not in ['groebner', 'msolve', 'resultants', 'jacobian']:
-        raise ValueError(f'"{algorithm}" is not a valid algorithm. Specify one of "groebner" or "msolve" or "resultants" or "jacobian".')
+    if algorithm == 'auto':
+        # Prefer msolve for multivariate systems when available; Groebner for univariate.
+        algorithm = 'msolve' if len(f.variables()) >= 2 else 'groebner'
+    elif algorithm not in ['groebner', 'msolve', 'resultants', 'jacobian']:
+        raise ValueError(f'"{algorithm}" is not a valid algorithm. Specify one of "groebner" or "msolve" or "resultants" or "jacobian" or "auto".')
 
     if d is None:
         d = f.degree()
 
     R = f.base_ring()
     N = R.cardinality()
-    f_ = (f // f.lc()).change_ring(ZZ)
+    # Normalize f to be monic modulo N without using polynomial division over non-fields.
+    # Division by a non-monomial is not implemented over non-fields in Singular,
+    # so compute the modular inverse of the leading coefficient when possible.
+    lc = int(f.lc())
+    try:
+        inv_lc = inverse_mod(lc, N)
+        f_ = (inv_lc * f).change_ring(ZZ)
+    except Exception:
+        # If lc is not invertible modulo N, fall back to no normalization.
+        f_ = f.change_ring(ZZ)
     f = f.change_ring(ZZ)
     l = f.lm()
 
     M = []
+    nvars = len(f.variables())
     for k in range(m+1):
         M_k = set()
         T = set((f^(m-k)).monomials())
         for mon in (f^m).monomials():
             if mon//l^k in T: 
-                for extra in itertools.product(range(d), repeat=f.nvariables()):
+                for extra in itertools.product(range(d), repeat=nvars):
                     g = mon * prod(map(power, f.variables(), extra))
                     M_k.add(g)
         M.append(M_k)
@@ -107,9 +120,16 @@ def small_roots(f, bounds, m=1, d=None, algorithm='groebner', lattice_reduction=
 
     elif algorithm == 'msolve':
         msolve_time = cputime()
-        roots = solve_system_with_gb(H, list(f.variables()), msolve=True)
-        verbose(f'Solving system with Groebner (msolve) bases took {cputime(msolve_time):.3f}s')
-        return roots
+        try:
+            roots = solve_system_with_gb(H, list(f.variables()), msolve=True)
+            verbose(f'Solving system with Groebner (msolve) bases took {cputime(msolve_time):.3f}s')
+            return roots
+        except Exception as e:
+            verbose(f'msolve failed ({e}); falling back to Groebner')
+            groebner_timer = cputime()
+            roots = solve_system_with_gb(H, list(f.variables()))
+            verbose(f'Solving system with Groebner bases took {cputime(groebner_timer):.3f}s')
+            return roots
 
     elif algorithm == 'resultants':
         resultants_timer = cputime()
